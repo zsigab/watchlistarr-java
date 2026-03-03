@@ -1,0 +1,92 @@
+package watchlistarr.radarr;
+
+import com.fasterxml.jackson.core.type.TypeReference;
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import watchlistarr.config.RadarrConfig;
+import watchlistarr.http.HttpService;
+import watchlistarr.model.Item;
+import watchlistarr.radarr.model.AddOptions;
+import watchlistarr.radarr.model.RadarrMovie;
+import watchlistarr.radarr.model.RadarrMovieExclusion;
+import watchlistarr.radarr.model.RadarrPost;
+
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+
+@ApplicationScoped
+public class RadarrService {
+
+    private static final Logger log = LoggerFactory.getLogger(RadarrService.class);
+
+    @Inject HttpService http;
+
+    public Set<Item> fetchMovies(RadarrConfig config, boolean bypass) {
+        var movies = getArr(config.baseUrl, config.apiKey, "movie", new TypeReference<List<RadarrMovie>>() {});
+        var exclusions = bypass
+            ? List.<RadarrMovieExclusion>of()
+            : getArr(config.baseUrl, config.apiKey, "exclusions", new TypeReference<List<RadarrMovieExclusion>>() {});
+
+        var result = new HashSet<Item>();
+        movies.stream().map(this::toItem).forEach(result::add);
+        exclusions.stream().map(this::toMovieItem).forEach(result::add);
+        return result;
+    }
+
+    public void addToRadarr(RadarrConfig config, Item item) {
+        var post = new RadarrPost(
+            item.title,
+            item.getTmdbId().orElse(0L),
+            config.qualityProfileId,
+            config.rootFolder,
+            new ArrayList<>(config.tagIds)
+        );
+        var result = http.post(config.baseUrl + "/api/v3/movie", config.apiKey, post);
+        if (result.isPresent()) {
+            log.info("Sent {} to Radarr", item.title);
+        } else {
+            log.debug("Received warning for sending {} to Radarr", item.title);
+        }
+    }
+
+    public void deleteFromRadarr(RadarrConfig config, Item item, boolean deleteFiles) {
+        var id = item.getRadarrId().orElseGet(() -> {
+            log.warn("Unable to extract Radarr ID from movie to delete: {}", item);
+            return 0L;
+        });
+        var url = config.baseUrl + "/api/v3/movie/" + id
+            + "?deleteFiles=" + deleteFiles + "&addImportExclusion=false";
+        http.delete(url, config.apiKey);
+        log.info("Deleted {} from Radarr", item.title);
+    }
+
+    private Item toItem(RadarrMovie m) {
+        List<String> guids = new ArrayList<>();
+        if (m.imdbId != null) guids.add(m.imdbId);
+        if (m.tmdbId != null) guids.add("tmdb://" + m.tmdbId);
+        guids.add("radarr://" + m.id);
+        return new Item(m.title, guids, "movie", null);
+    }
+
+    private Item toMovieItem(RadarrMovieExclusion e) {
+        return toItem(new RadarrMovie() {{ title = e.movieTitle; imdbId = e.imdbId; tmdbId = e.tmdbId; id = e.id; }});
+    }
+
+    private <T> T getArr(String baseUrl, String apiKey, String endpoint, TypeReference<T> type) {
+        var result = http.get(baseUrl + "/api/v3/" + endpoint, apiKey);
+        if (result.isEmpty()) {
+            log.warn("No response from Radarr endpoint: {}", endpoint);
+            try { return http.getMapper().convertValue(List.of(), type); } catch (Exception e) { return null; }
+        }
+        try {
+            return http.getMapper().convertValue(result.get(), type);
+        } catch (Exception e) {
+            log.warn("Failed to decode Radarr response for {}: {}", endpoint, e.getMessage());
+            try { return http.getMapper().convertValue(List.of(), type); } catch (Exception ex) { return null; }
+        }
+    }
+}

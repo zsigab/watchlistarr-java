@@ -1,19 +1,18 @@
-FROM hseeberger/scala-sbt:eclipse-temurin-11.0.14.1_1.6.2_2.13.8 as build
-
+## Build stage
+FROM maven:3.9-eclipse-temurin-21 AS build
 WORKDIR /app
+COPY pom.xml .
+RUN mvn dependency:go-offline -q
+COPY src ./src
+RUN mvn package -DskipTests -q
 
-COPY . .
-
-RUN sbt update compile stage
-RUN chmod a+rx /app/target/universal/stage/bin/*
-
-FROM openjdk:11-jre-slim
-
+## Runtime stage
+FROM eclipse-temurin:21-jre-alpine
 WORKDIR /app
-
-COPY --from=build /app/target/universal/stage /app
-
+COPY --from=build /app/target/quarkus-app/lib/ ./lib/
+COPY --from=build /app/target/quarkus-app/*.jar ./
+COPY --from=build /app/target/quarkus-app/app/ ./app/
+COPY --from=build /app/target/quarkus-app/quarkus/ ./quarkus/
 COPY --chmod=755 docker/entrypoint.sh /app/entrypoint.sh
-RUN sed -i 's/\r$//' /app/entrypoint.sh
-
+VOLUME ["/app/config"]
 ENTRYPOINT ["/app/entrypoint.sh"]
